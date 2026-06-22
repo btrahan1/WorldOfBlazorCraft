@@ -1,0 +1,45 @@
+## Ignore Visual Studio temporary files, build results, and user-specific files.
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# User-specific files (MonoDevelop/ActiveWriter)
+*.userprefs
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPS/
+[Rr]elease/
+[Rr]eleasePS/
+x64/
+x86/
+[Aa]rm/
+[Aa]rm64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio 2015/2017/2019/2022 cache directory
+.vs/
+
+# Other IDEs
+.idea/
+.vscode/
+
+# Web publishing output
+publish/
+dist/
+
+# Local logs
+*.log
+freecode_agent_loop.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db

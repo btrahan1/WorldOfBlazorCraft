@@ -1,0 +1,736 @@
+@page "/"
+@using System.Net.WebSockets
+@using System.Text
+@using System.Text.Json
+@using System.Text.Json.Serialization
+@implements IDisposable
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+
+<PageTitle>World of BlazorCraft</PageTitle>
+
+<div class="launcher-container">
+    <div class="launcher-header">
+        <h1 class="launcher-title">WORLD OF BLAZORCRAFT</h1>
+        <div class="view-tabs">
+            <button class="view-tab @(activeView == "3d" ? "active" : "")" @onclick='() => SwitchView("3d")'>3D View</button>
+            <button class="view-tab @(activeView == "map" ? "active" : "")" @onclick='() => SwitchView("map")'>2D Map</button>
+        </div>
+    </div>
+
+    <div class="panel-layout">
+        <div class="left-column">
+            <div class="panel status-panel">
+                <h3 class="panel-header">Connection</h3>
+                <div class="status-indicator">
+                    <span class="indicator-dot @StatusClass"></span>
+                    <span class="status-text">@StatusText</span>
+                </div>
+                <div class="status-details">
+                    <p>Endpoint: <code>@WebSocketUrl</code></p>
+                </div>
+                <button class="btn-primary" @onclick="SendPing" disabled="@(webSocket?.State != WebSocketState.Open)">
+                    Send Ping
+                </button>
+            </div>
+
+            <div class="panel coordinates-panel">
+                <h3 class="panel-header">Character Position</h3>
+                @if (selfPlayer != null)
+                {
+                    <div class="coords-grid">
+                        <div class="coord-row">
+                            <span class="coord-label">Name:</span>
+                            <span class="coord-val text-gold">@selfPlayer.Nm</span>
+                        </div>
+                        <div class="coord-row">
+                            <span class="coord-label">X:</span>
+                            <span class="coord-val">@selfPlayer.X.ToString("F2")</span>
+                        </div>
+                        <div class="coord-row">
+                            <span class="coord-label">Y (Height):</span>
+                            <span class="coord-val">@selfPlayer.Y.ToString("F2")</span>
+                        </div>
+                        <div class="coord-row">
+                            <span class="coord-label">Z:</span>
+                            <span class="coord-val">@selfPlayer.Z.ToString("F2")</span>
+                        </div>
+                        <div class="coord-row">
+                            <span class="coord-label">Facing:</span>
+                            <span class="coord-val">@selfPlayer.F.ToString("F2") rad</span>
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="no-coords">Waiting for server state...</div>
+                }
+            </div>
+
+            <div class="panel controls-panel">
+                <h3 class="panel-header">Active Inputs</h3>
+                <div class="keys-grid">
+                    <span class="key-indicator @(keyForward ? "active" : "")">W Forward</span>
+                    <span class="key-indicator @(keyBack ? "active" : "")">S Back</span>
+                    <span class="key-indicator @(keyTurnLeft ? "active" : "")">A Turn L</span>
+                    <span class="key-indicator @(keyTurnRight ? "active" : "")">D Turn R</span>
+                    <span class="key-indicator @(keyStrafeLeft ? "active" : "")">Q Strafe L</span>
+                    <span class="key-indicator @(keyStrafeRight ? "active" : "")">E Strafe R</span>
+                    <span class="key-indicator @(keyJump ? "active" : "")">Space Jump</span>
+                </div>
+            </div>
+
+            <div class="panel log-panel">
+                <h3 class="panel-header">Console Log</h3>
+                <div class="log-output" id="logOutput">
+                    @foreach (var log in logs)
+                    {
+                        <div class="log-entry">
+                            <span class="log-time">[@log.Time.ToString("HH:mm:ss")]</span>
+                            <span class="log-message">@log.Message</span>
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="right-column">
+            @* 3D Canvas View *@
+            <div class="panel canvas-panel @(activeView == "3d" ? "" : "hidden")">
+                <h3 class="panel-header">Eastbrook Vale (3D)</h3>
+                <div class="canvas-wrapper focusable-container"
+                     @ref="canvasContainer"
+                     tabindex="0"
+                     @onkeydown="HandleKeyDown"
+                     @onkeyup="HandleKeyUp"
+                     @onfocus="() => isFocused = true"
+                     @onblur="() => { isFocused = false; HandleBlur(); }">
+                    <canvas id="gameCanvas" class="game-canvas"></canvas>
+                    @if (!isFocused)
+                    {
+                        <div class="focus-overlay" @onclick="FocusContainer">
+                            CLICK TO FOCUS<br />
+                            (W/S: Move, A/D: Turn, Q/E: Strafe, Space: Jump)<br />
+                            Right-drag to orbit camera, Scroll to zoom
+                        </div>
+                    }
+                </div>
+            </div>
+
+            @* 2D SVG Map View *@
+            <div class="panel map-panel-container @(activeView == "map" ? "" : "hidden")">
+                <h3 class="panel-header">Eastbrook Vale (2D Map)</h3>
+                <div class="map-wrapper focusable-container"
+                     @ref="mapContainer"
+                     tabindex="0"
+                     @onkeydown="HandleKeyDown"
+                     @onkeyup="HandleKeyUp"
+                     @onfocus="() => isFocused = true"
+                     @onblur="() => { isFocused = false; HandleBlur(); }">
+                    <svg viewBox="-180 -180 360 360" width="100%" height="100%" class="world-map">
+                        <line x1="-180" y1="0" x2="180" y2="0" stroke="#1c1c1c" stroke-width="1" />
+                        <line x1="0" y1="-180" x2="0" y2="180" stroke="#1c1c1c" stroke-width="1" />
+                        <path d="M 0 -8 L -8 -30 L -15 -55 L -2 -78" fill="none" stroke="#2c2c2c" stroke-width="3" stroke-dasharray="2 2" />
+                        <path d="M 8 -2 L 30 -8 L 55 -12" fill="none" stroke="#2c2c2c" stroke-width="3" stroke-dasharray="2 2" />
+                        <path d="M 6 6 L 30 30 L 50 50 L 65 65" fill="none" stroke="#2c2c2c" stroke-width="3" stroke-dasharray="2 2" />
+                        <path d="M -8 -6 L -35 -25 L -58 -48 L -66 -58" fill="none" stroke="#2c2c2c" stroke-width="3" stroke-dasharray="2 2" />
+                        <path d="M -6 6 L -30 28 L -55 45 L -70 55" fill="none" stroke="#2c2c2c" stroke-width="3" stroke-dasharray="2 2" />
+                        <circle cx="-92" cy="-88" r="30" fill="#122c40" stroke="#1d4d75" stroke-width="1.5" opacity="0.8" />
+                        <text x="-92" y="-88" font-size="8" fill="#3888c7" text-anchor="middle" dominant-baseline="middle" font-family="monospace">Mirror Lake</text>
+                        <circle cx="0" cy="0" r="26" fill="#2d2516" stroke="gold" stroke-dasharray="4 2" stroke-width="1.5" opacity="0.6" />
+                        <text x="0" y="0" font-size="8" fill="gold" text-anchor="middle" dominant-baseline="middle" font-family="monospace">Eastbrook</text>
+                        <circle cx="-15" cy="-55" r="22" fill="#521818" stroke="#872b2b" stroke-dasharray="2 2" stroke-width="1" opacity="0.25" />
+                        <circle cx="55" cy="-12" r="22" fill="#521818" stroke="#872b2b" stroke-dasharray="2 2" stroke-width="1" opacity="0.25" />
+                        <circle cx="65" cy="65" r="24" fill="#521818" stroke="#872b2b" stroke-dasharray="2 2" stroke-width="1" opacity="0.25" />
+                        <circle cx="-60" cy="-5" r="22" fill="#521818" stroke="#872b2b" stroke-dasharray="2 2" stroke-width="1" opacity="0.25" />
+                        <circle cx="-82" cy="62" r="20" fill="#521818" stroke="#872b2b" stroke-dasharray="2 2" stroke-width="1" opacity="0.25" />
+                        <text x="-15" y="-55" font-size="6" fill="#777" text-anchor="middle" opacity="0.8">Wolves</text>
+                        <text x="55" y="-12" font-size="6" fill="#777" text-anchor="middle" opacity="0.8">Boars</text>
+                        <text x="65" y="65" font-size="6" fill="#777" text-anchor="middle" opacity="0.8">Bandits</text>
+                        <text x="-60" y="-5" font-size="6" fill="#777" text-anchor="middle" opacity="0.8">Spiders</text>
+                        <text x="-82" y="62" font-size="6" fill="#777" text-anchor="middle" opacity="0.8">Mine</text>
+                        @foreach (var other in entities)
+                        {
+                            <g transform="translate(@other.X, @(-other.Z)) rotate(@(other.F * 180.0 / Math.PI))">
+                                <polygon points="0,-6 -4,4 4,4" fill="#ff3330" stroke="#000" stroke-width="1" />
+                                <text x="0" y="12" font-size="5" fill="#ff3330" text-anchor="middle" font-family="monospace">@other.Nm</text>
+                            </g>
+                        }
+                        @if (selfPlayer != null)
+                        {
+                            <g transform="translate(@selfPlayer.X, @(-selfPlayer.Z))">
+                                <line x1="0" y1="0" x2="@(12 * Math.Sin(selfPlayer.F))" y2="@(-12 * Math.Cos(selfPlayer.F))" stroke="gold" stroke-width="1.5" />
+                                <circle cx="0" cy="0" r="5" fill="gold" stroke="black" stroke-width="1" />
+                                <polygon points="0,-4 -2.5,2 2.5,2" fill="black" transform="rotate(@(selfPlayer.F * 180.0 / Math.PI))" />
+                                <text x="0" y="12" font-size="6" font-weight="bold" fill="gold" text-anchor="middle" font-family="monospace">@selfPlayer.Nm</text>
+                            </g>
+                        }
+                    </svg>
+                    @if (!isFocused)
+                    {
+                        <div class="focus-overlay" @onclick="FocusContainer">
+                            CLICK TO ENROLL KEYBOARD INPUTS<br />
+                            (W/S: Move, A/D: Turn, Q/E: Strafe, Space: Jump)
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private ClientWebSocket? webSocket;
+    private CancellationTokenSource? cts;
+    private string WebSocketUrl = string.Empty;
+    private string StatusText = "Connecting...";
+    private string StatusClass = "connecting";
+    private List<LogEntry> logs = new List<LogEntry>();
+
+    private ElementReference mapContainer;
+    private ElementReference canvasContainer;
+    private bool isFocused = false;
+    private string activeView = "3d";
+    private bool rendererReady = false;
+    private IJSObjectReference? _jsModule;
+
+    private bool keyForward;
+    private bool keyBack;
+    private bool keyTurnLeft;
+    private bool keyTurnRight;
+    private bool keyStrafeLeft;
+    private bool keyStrafeRight;
+    private bool keyJump;
+    private double facing = 0.0;
+
+    private PlayerSelf? selfPlayer;
+    private List<EntityDto> entities = new List<EntityDto>();
+
+    private class LogEntry
+    {
+        public DateTime Time { get; set; }
+        public string Message { get; set; } = string.Empty;
+    }
+
+    private class PlayerSelf
+    {
+        public int Id { get; set; }
+        public string K { get; set; } = string.Empty;
+        public string Tid { get; set; } = string.Empty;
+        public string Nm { get; set; } = string.Empty;
+        public int Lv { get; set; }
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Z { get; set; }
+        public double F { get; set; }
+        public double Hp { get; set; }
+        public double Mhp { get; set; }
+    }
+
+    private class EntityDto
+    {
+        public int Id { get; set; }
+        public string K { get; set; } = string.Empty;
+        public string Tid { get; set; } = string.Empty;
+        public string Nm { get; set; } = string.Empty;
+        public int Lv { get; set; }
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Z { get; set; }
+        public double F { get; set; }
+        public double Hp { get; set; }
+        public double Mhp { get; set; }
+    }
+
+    private static readonly JsonSerializerOptions jsonOptions = new JsonSerializerOptions
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        var baseUri = new Uri(Navigation.BaseUri);
+        var scheme = baseUri.Scheme == "https" ? "wss" : "ws";
+        WebSocketUrl = $"{scheme}://{baseUri.Host}:{baseUri.Port}/ws";
+
+        AddLog("Initializing WebSocket client");
+        await ConnectAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && activeView == "3d")
+        {
+            await InitRenderer();
+        }
+    }
+
+    private async Task InitRenderer()
+    {
+        if (rendererReady) return;
+        try
+        {
+            // Import the ES module - this awaits full module resolution before returning.
+            _jsModule = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "/js/game_renderer.js");
+            var canvas = await JS.InvokeAsync<IJSObjectReference>(
+                "eval", "document.getElementById('gameCanvas')");
+            await _jsModule.InvokeVoidAsync("init", canvas, 42);
+            rendererReady = true;
+            AddLog("3D renderer initialized");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"3D renderer init failed: {ex.Message}");
+        }
+    }
+
+    private async Task SwitchView(string view)
+    {
+        activeView = view;
+        StateHasChanged();
+        if (view == "3d" && !rendererReady)
+        {
+            await Task.Delay(50);
+            await InitRenderer();
+        }
+        else if (view == "3d" && rendererReady && _jsModule != null)
+        {
+            try { await _jsModule.InvokeVoidAsync("resize"); } catch { }
+        }
+    }
+
+    private async Task ConnectAsync()
+    {
+        try
+        {
+            webSocket = new ClientWebSocket();
+            cts = new CancellationTokenSource();
+
+            AddLog($"Connecting to {WebSocketUrl}");
+            await webSocket.ConnectAsync(new Uri(WebSocketUrl), cts.Token);
+
+            StatusText = "Connected";
+            StatusClass = "connected";
+            AddLog("Connection established successfully");
+
+            _ = StartReceiveLoopAsync();
+            _ = StartSendInputLoopAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = "Disconnected";
+            StatusClass = "disconnected";
+            AddLog($"Connection failed: {ex.Message}");
+        }
+    }
+
+    private async Task StartReceiveLoopAsync()
+    {
+        var buffer = new byte[1024 * 32];
+        try
+        {
+            while (webSocket?.State == WebSocketState.Open && cts != null && !cts.Token.IsCancellationRequested)
+            {
+                var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    StatusText = "Disconnected";
+                    StatusClass = "disconnected";
+                    AddLog("Server closed connection");
+                    break;
+                }
+                else if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    var msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(msg);
+                        var root = doc.RootElement;
+                        if (root.TryGetProperty("t", out var tProp) && tProp.GetString() == "snap")
+                        {
+                            if (root.TryGetProperty("self", out var selfProp))
+                            {
+                                selfPlayer = JsonSerializer.Deserialize<PlayerSelf>(selfProp, jsonOptions);
+                            }
+                            if (root.TryGetProperty("ents", out var entsProp))
+                            {
+                                entities = JsonSerializer.Deserialize<List<EntityDto>>(entsProp, jsonOptions) ?? new List<EntityDto>();
+                            }
+
+                            // Forward snapshot to 3D renderer
+                            if (rendererReady && _jsModule != null)
+                            {
+                                try
+                                {
+                                    var snapObj = JsonSerializer.Deserialize<object>(msg, jsonOptions);
+                                    await _jsModule.InvokeVoidAsync("updateState", snapObj);
+                                }
+                                catch { }
+                            }
+
+                            StateHasChanged();
+                        }
+                        else
+                        {
+                            AddLog($"Received: {msg}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        AddLog($"JSON Error: {ex.Message}");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = "Disconnected";
+            StatusClass = "disconnected";
+            AddLog($"Receive loop error: {ex.Message}");
+        }
+    }
+
+    private async Task StartSendInputLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(50));
+        while (webSocket?.State == WebSocketState.Open && cts != null && !cts.Token.IsCancellationRequested)
+        {
+            try
+            {
+                await SendInputStateAsync();
+                await timer.WaitForNextTickAsync(cts.Token);
+            }
+            catch
+            {
+                break;
+            }
+        }
+    }
+
+    private async Task SendInputStateAsync()
+    {
+        if (webSocket?.State != WebSocketState.Open) return;
+
+        var mi = new StringBuilder();
+        mi.Append("{");
+        mi.Append($"\"f\":{(keyForward ? "true" : "false")},");
+        mi.Append($"\"b\":{(keyBack ? "true" : "false")},");
+        mi.Append($"\"tl\":{(keyTurnLeft ? "true" : "false")},");
+        mi.Append($"\"tr\":{(keyTurnRight ? "true" : "false")},");
+        mi.Append($"\"sl\":{(keyStrafeLeft ? "true" : "false")},");
+        mi.Append($"\"sr\":{(keyStrafeRight ? "true" : "false")},");
+        mi.Append($"\"j\":{(keyJump ? "true" : "false")}");
+        mi.Append("}");
+
+        var msg = $"{{\"t\":\"input\",\"mi\":{mi},\"facing\":{facing}}}";
+        var bytes = Encoding.UTF8.GetBytes(msg);
+        await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+    }
+
+    private async Task SendPing()
+    {
+        if (webSocket?.State != WebSocketState.Open)
+        {
+            AddLog("Cannot send: connection is closed");
+            return;
+        }
+
+        try
+        {
+            var msgBytes = Encoding.UTF8.GetBytes("{\"t\":\"ping\"}");
+            AddLog("Sending: {\"t\":\"ping\"}");
+            await webSocket.SendAsync(new ArraySegment<byte>(msgBytes), WebSocketMessageType.Text, true, cts?.Token ?? CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Send failed: {ex.Message}");
+        }
+    }
+
+    private void HandleKeyDown(KeyboardEventArgs e)
+    {
+        var key = e.Key.ToLower();
+        if (key == "w" || e.Key == "ArrowUp") keyForward = true;
+        else if (key == "s" || e.Key == "ArrowDown") keyBack = true;
+        else if (key == "a") keyTurnLeft = true;
+        else if (key == "d") keyTurnRight = true;
+        else if (key == "q" || e.Key == "ArrowLeft") keyStrafeLeft = true;
+        else if (key == "e" || e.Key == "ArrowRight") keyStrafeRight = true;
+        else if (e.Key == " ") keyJump = true;
+    }
+
+    private void HandleKeyUp(KeyboardEventArgs e)
+    {
+        var key = e.Key.ToLower();
+        if (key == "w" || e.Key == "ArrowUp") keyForward = false;
+        else if (key == "s" || e.Key == "ArrowDown") keyBack = false;
+        else if (key == "a") keyTurnLeft = false;
+        else if (key == "d") keyTurnRight = false;
+        else if (key == "q" || e.Key == "ArrowLeft") keyStrafeLeft = false;
+        else if (key == "e" || e.Key == "ArrowRight") keyStrafeRight = false;
+        else if (e.Key == " ") keyJump = false;
+    }
+
+    private void HandleBlur()
+    {
+        keyForward = false;
+        keyBack = false;
+        keyTurnLeft = false;
+        keyTurnRight = false;
+        keyStrafeLeft = false;
+        keyStrafeRight = false;
+        keyJump = false;
+    }
+
+    private async Task FocusContainer()
+    {
+        isFocused = true;
+        if (activeView == "3d")
+        {
+            await canvasContainer.FocusAsync();
+        }
+        else
+        {
+            await mapContainer.FocusAsync();
+        }
+    }
+
+    private void AddLog(string msg)
+    {
+        logs.Add(new LogEntry { Time = DateTime.Now, Message = msg });
+        if (logs.Count > 100) logs.RemoveAt(0);
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        cts?.Cancel();
+        cts?.Dispose();
+        webSocket?.Dispose();
+        try { _jsModule?.InvokeVoidAsync("dispose"); } catch { }
+        try { _jsModule?.DisposeAsync(); } catch { }
+    }
+}
+
+<style>
+    .launcher-container {
+        font-family: 'Courier New', monospace;
+        background: #0b0b0b;
+        color: #ddd;
+        min-height: 100vh;
+        padding: 24px 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+    .launcher-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 2px solid gold;
+        padding-bottom: 10px;
+        width: 100%;
+        max-width: 1200px;
+        margin-bottom: 24px;
+    }
+    .launcher-title {
+        font-size: 28px;
+        color: gold;
+        font-weight: bold;
+        letter-spacing: 2px;
+        margin: 0;
+    }
+    .view-tabs {
+        display: flex;
+        gap: 4px;
+    }
+    .view-tab {
+        background: #1e1e1e;
+        color: #888;
+        border: 1px solid #333;
+        padding: 6px 18px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transition: all 0.15s;
+    }
+    .view-tab.active {
+        background: #2d2516;
+        color: gold;
+        border-color: gold;
+    }
+    .view-tab:hover:not(.active) {
+        color: #bbb;
+        border-color: #555;
+    }
+    .panel-layout {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        gap: 16px;
+        width: 100%;
+        max-width: 1200px;
+    }
+    @@media (max-width: 900px) {
+        .panel-layout { grid-template-columns: 1fr; }
+        .launcher-header { flex-direction: column; gap: 12px; }
+    }
+    .left-column, .right-column {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+    }
+    .panel {
+        background: #141414;
+        border: 2px solid #282828;
+        border-radius: 4px;
+        padding: 16px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
+        position: relative;
+    }
+    .panel.hidden { display: none; }
+    .panel-header {
+        color: gold;
+        font-size: 13px;
+        margin-top: 0;
+        margin-bottom: 12px;
+        border-bottom: 1px solid #2c2c2c;
+        padding-bottom: 5px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+    }
+    .indicator-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        display: inline-block;
+        flex-shrink: 0;
+    }
+    .indicator-dot.connecting { background-color: #d4a373; box-shadow: 0 0 8px #d4a373; }
+    .indicator-dot.connected  { background-color: #27ae60; box-shadow: 0 0 8px #27ae60; }
+    .indicator-dot.disconnected { background-color: #c0392b; box-shadow: 0 0 8px #c0392b; }
+    .status-text { font-size: 14px; font-weight: bold; }
+    .status-details { font-size: 11px; color: #666; margin-bottom: 12px; }
+    .status-details p { margin: 0; }
+    .btn-primary {
+        background-color: #1e1e1e;
+        color: gold;
+        border: 1px solid gold;
+        padding: 7px 14px;
+        cursor: pointer;
+        width: 100%;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: bold;
+        text-transform: uppercase;
+        transition: all 0.2s;
+    }
+    .btn-primary:hover:not(:disabled) { background-color: gold; color: black; }
+    .btn-primary:disabled { border-color: #333; color: #555; cursor: not-allowed; }
+    .coordinates-panel { min-height: 160px; }
+    .coords-grid { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+    .coord-row {
+        display: flex;
+        justify-content: space-between;
+        border-bottom: 1px solid #1a1a1a;
+        padding-bottom: 3px;
+    }
+    .coord-label { color: #777; }
+    .coord-val { font-weight: bold; }
+    .text-gold { color: gold; }
+    .no-coords { color: #555; text-align: center; padding-top: 30px; font-style: italic; font-size: 12px; }
+    .keys-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .key-indicator {
+        background: #1c1c1c;
+        border: 1px solid #333;
+        padding: 4px;
+        border-radius: 3px;
+        text-align: center;
+        font-size: 10px;
+        color: #555;
+        transition: all 0.1s;
+    }
+    .key-indicator.active {
+        background: gold;
+        color: black;
+        border-color: gold;
+        font-weight: bold;
+        box-shadow: 0 0 5px rgba(255, 215, 0, 0.4);
+    }
+    .canvas-panel {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+    }
+    .canvas-wrapper {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        min-height: 360px;
+        background: #0d0d0d;
+        border: 1px solid #222;
+        border-radius: 4px;
+        overflow: hidden;
+        outline: none;
+        cursor: pointer;
+    }
+    .game-canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+    .map-panel-container { display: flex; flex-direction: column; flex: 1; }
+    .map-wrapper {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 1;
+        background: #0d0d0d;
+        border: 1px solid #222;
+        border-radius: 4px;
+        overflow: hidden;
+        outline: none;
+        cursor: pointer;
+    }
+    .world-map { display: block; width: 100%; height: 100%; }
+    .focusable-container { outline: none; }
+    .focus-overlay {
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 0, 0, 0.82);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        color: gold;
+        border-radius: 4px;
+        text-align: center;
+        padding: 20px;
+        font-size: 12px;
+        line-height: 1.8;
+        border: 2px dashed #333;
+        box-sizing: border-box;
+    }
+    .focus-overlay:hover { background: rgba(0, 0, 0, 0.72); border-color: gold; }
+    .log-panel { display: flex; flex-direction: column; }
+    .log-output {
+        height: 120px;
+        overflow-y: auto;
+        background: #000;
+        border: 1px solid #222;
+        border-radius: 4px;
+        padding: 8px;
+        font-size: 10px;
+        color: #27ae60;
+    }
+    .log-entry { margin-bottom: 3px; line-height: 1.3; }
+    .log-time { color: #444; margin-right: 4px; }
+    .log-message { word-break: break-all; }
+</style>
