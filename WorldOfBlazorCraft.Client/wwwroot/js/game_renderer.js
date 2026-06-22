@@ -29,9 +29,13 @@ function loadScript(src) {
 }
 
 async function ensureThree() {
-    if (window.THREE && window.THREE.GLTFLoader) return;
+    if (window.THREE && window.THREE.GLTFLoader && window.MeshoptDecoder) return;
     await loadScript('https://unpkg.com/three@0.147.0/build/three.min.js');
     await loadScript('https://unpkg.com/three@0.147.0/examples/js/loaders/GLTFLoader.js');
+    await loadScript('https://unpkg.com/meshoptimizer@0.18.1/meshopt_decoder.js');
+    if (window.MeshoptDecoder && window.MeshoptDecoder.ready) {
+        await window.MeshoptDecoder.ready;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,11 +201,22 @@ function modelUrl(ent) {
         : `/models/creatures/${CREATURE_MAP[ent.tid] || 'goblin'}.glb`;
 }
 
+let gltfLoader = null;
+function getLoader() {
+    if (!gltfLoader) {
+        gltfLoader = new THREE.GLTFLoader();
+        if (window.MeshoptDecoder) {
+            gltfLoader.setMeshoptDecoder(window.MeshoptDecoder);
+        }
+    }
+    return gltfLoader;
+}
+
 function loadModel(url) {
     if (modelCache.has(url)) return Promise.resolve(modelCache.get(url));
     if (modelLoadQ.has(url)) return modelLoadQ.get(url);
     const p = new Promise((resolve, reject) => {
-        new THREE.GLTFLoader().load(url, g => { modelCache.set(url, g); resolve(g); }, undefined, reject);
+        getLoader().load(url, g => { modelCache.set(url, g); resolve(g); }, undefined, reject);
     });
     modelLoadQ.set(url, p);
     return p;
@@ -257,6 +272,88 @@ function removeView(id) {
 }
 
 // ---------------------------------------------------------------------------
+// Roads & seeded noise for decorations (mirrors world.ts / rng.ts)
+// ---------------------------------------------------------------------------
+
+const ROADS = [
+  [{ x: 0, z: 8 }, { x: -8, z: 30 }, { x: -15, z: 55 }, { x: -2, z: 78 }],
+  [{ x: 8, z: 2 }, { x: 30, z: 8 }, { x: 55, z: 12 }],
+  [{ x: 6, z: -6 }, { x: 30, z: -30 }, { x: 50, z: -50 }, { x: 65, z: -65 }],
+  [{ x: -8, z: 6 }, { x: -35, z: 25 }, { x: -58, z: 48 }, { x: -66, z: 58 }],
+  [{ x: -6, z: -6 }, { x: -30, z: -28 }, { x: -55, z: -45 }, { x: -70, z: -55 }],
+  [{ x: 6, z: 8 }, { x: 35, z: 35 }, { x: 60, z: 60 }, { x: 78, z: 74 }],
+];
+
+function hash2(x, y, seed) {
+  let h = seed >>> 0;
+  h = Math.imul(h ^ (x * 374761393), 668265263);
+  h = Math.imul(h ^ (y * 1274126177), 461845907);
+  h ^= h >>> 13;
+  h = Math.imul(h, 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+function roadDistance(x, z) {
+  let best = Infinity;
+  for (const road of ROADS) {
+    for (let i = 0; i < road.length - 1; i++) {
+      const a = road[i], b = road[i + 1];
+      const abx = b.x - a.x, abz = b.z - a.z;
+      const apx = x - a.x, apz = z - a.z;
+      const len2 = abx * abx + abz * abz;
+      const t = len2 > 0 ? Math.max(0, Math.min(1, (apx * abx + apz * abz) / len2)) : 0;
+      const dx = apx - abx * t, dz = apz - abz * t;
+      const d = Math.hypot(dx, dz);
+      if (d < best) best = d;
+    }
+  }
+  return best;
+}
+
+function generateDecorations(seed) {
+  const out = [];
+  const step = 10;
+  const xHalf = 180 - 14;
+  for (let gx = -xHalf; gx < xHalf; gx += step) {
+    for (let gz = -180 + 14; gz < 180 - 14; gz += step) {
+      const r = hash2(Math.round(gx), Math.round(gz), seed + 31);
+      const biome = 'vale';
+      let kind = null;
+      if (r > 0.48) continue;
+      kind = r < 0.30 ? 'tree' : r < 0.40 ? 'tree2' : 'rock';
+      
+      const ox = (hash2(Math.round(gx), Math.round(gz), seed + 57) - 0.5) * step;
+      const oz = (hash2(Math.round(gx), Math.round(gz), seed + 91) - 0.5) * step;
+      const x = gx + ox, z = gz + oz;
+      
+      let inHub = false;
+      const hubX = 0, hubZ = 0, hubR = 26;
+      if (Math.hypot(x - hubX, z - hubZ) < hubR + 4) inHub = true;
+      if (inHub) continue;
+      
+      if (terrainHeight(x, z, seed) < WATER_LEVEL + 1) continue;
+      if (roadDistance(x, z) < 5) continue;
+      
+      let inCamp = false;
+      for (const c of CAMPS) {
+        if (Math.hypot(x - c.x, z - c.z) < c.r + 3) { inCamp = true; break; }
+      }
+      if (inCamp) continue;
+      
+      out.push({
+        kind,
+        x, z,
+        scale: 0.7 + hash2(Math.round(gx), Math.round(gz), seed + 13) * 0.9,
+        variant: Math.floor(hash2(Math.round(gx), Math.round(gz), seed + 77) * 3),
+        biome,
+      });
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Terrain mesh (Eastbrook Vale, zone 1)
 // ---------------------------------------------------------------------------
 
@@ -273,6 +370,14 @@ function buildTerrain(seed) {
             pos[vi*3]=wx; pos[vi*3+1]=h; pos[vi*3+2]=wz;
             tmp.copy(GRASS);
             tmp.lerp(SAND, Math.max(0,Math.min(1,(WATER_LEVEL+1.8-h)/1.8)));
+            
+            // Paint dirt roads onto the terrain
+            const rd = roadDistance(wx, wz);
+            if (rd < 5) {
+                const roadBlend = Math.max(0, Math.min(1, (5 - rd) / 1.5));
+                const ROAD_COLOR = new THREE.Color(0x8a6f47);
+                tmp.lerp(ROAD_COLOR, roadBlend);
+            }
             if (h>22) tmp.lerp(ROCK, Math.min(1,(h-22)/12));
             if (h>34) tmp.lerp(SNOW, Math.min(1,(h-34)/10));
             col[vi*3]=tmp.r; col[vi*3+1]=tmp.g; col[vi*3+2]=tmp.b;
@@ -310,6 +415,191 @@ function buildWater() {
     mesh.rotation.x = -Math.PI/2;
     mesh.position.set(0, WATER_LEVEL+0.05, -180);
     return mesh;
+}
+
+// ---------------------------------------------------------------------------
+// World Decorations & Foliage (pine, oak, rock, static town props)
+// ---------------------------------------------------------------------------
+
+function spawnInstanceGroup(gltf, positions, scaleMult, yOffset) {
+    gltf.scene.updateMatrixWorld(true);
+    const meshes = [];
+    gltf.scene.traverse(child => {
+        if (child.isMesh) meshes.push(child);
+    });
+    
+    const instancedMeshes = [];
+    for (const m of meshes) {
+        const geo = m.geometry.clone();
+        geo.applyMatrix4(m.matrixWorld);
+        const im = new THREE.InstancedMesh(geo, m.material, positions.length);
+        im.castShadow = true;
+        im.receiveShadow = true;
+        instancedMeshes.push(im);
+    }
+    
+    const tempMatrix = new THREE.Matrix4();
+    const tempPosition = new THREE.Vector3();
+    const tempRotation = new THREE.Quaternion();
+    const tempScale = new THREE.Vector3();
+    
+    positions.forEach((pos, idx) => {
+        tempPosition.set(pos.x, pos.y + (yOffset || 0), -pos.z);
+        tempRotation.setFromEuler(new THREE.Euler(0, pos.rot, 0));
+        const s = pos.scale * scaleMult;
+        tempScale.set(s, s, s);
+        tempMatrix.compose(tempPosition, tempRotation, tempScale);
+        
+        for (const mesh of instancedMeshes) {
+            mesh.setMatrixAt(idx, tempMatrix);
+        }
+    });
+    
+    for (const mesh of instancedMeshes) {
+        mesh.instanceMatrix.needsUpdate = true;
+        scene.add(mesh);
+    }
+}
+
+function spawnProp(gltf, x, y, z, rot, scale) {
+    const model = gltf.scene.clone(true);
+    model.position.set(x, y, -z);
+    model.rotation.y = rot;
+    if (scale !== undefined) {
+        if (typeof scale === 'number') model.scale.set(scale, scale, scale);
+        else model.scale.set(scale[0], scale[1], scale[2]);
+    }
+    model.traverse(child => {
+        if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+        }
+    });
+    scene.add(model);
+}
+
+async function buildWorldDecorations(seed) {
+    // 1. Spawning Foliage (Trees & Rocks)
+    const pines = [];
+    const oaks = [];
+    const rocks = [];
+    
+    const decos = generateDecorations(seed);
+    for (const d of decos) {
+        const y = terrainHeight(d.x, d.z, seed);
+        const rot = hash2(Math.round(d.x), Math.round(d.z), seed + 11) * Math.PI * 2;
+        const item = { x: d.x, y, z: d.z, rot, scale: d.scale };
+        if (d.kind === 'tree') pines.push(item);
+        else if (d.kind === 'tree2') oaks.push(item);
+        else if (d.kind === 'rock') rocks.push(item);
+    }
+    
+    const [pineGLTF, oakGLTF, rockGLTF] = await Promise.all([
+        loadModel('/models/foliage/pine_1.glb'),
+        loadModel('/models/foliage/oak_1.glb'),
+        loadModel('/models/foliage/rock_1.glb')
+    ]);
+    
+    spawnInstanceGroup(pineGLTF, pines, 1.1, -0.05);
+    spawnInstanceGroup(oakGLTF, oaks, 1.15, -0.05);
+    spawnInstanceGroup(rockGLTF, rocks, 1.0, 0);
+    
+    // 2. Spawning Static Props
+    const propModels = {};
+    const propUrls = {
+        house1: '/models/props/house_1.glb',
+        house2: '/models/props/house_2.glb',
+        inn: '/models/props/inn.glb',
+        chapel: '/models/props/house_3.glb',
+        well: '/models/props/well.glb',
+        stand1: '/models/props/market_stand_1.glb',
+        stand2: '/models/props/market_stand_2.glb',
+        tent: '/models/props/tent_small.glb',
+        crate: '/models/props/crate_wooden.glb',
+        bonfire: '/models/props/bonfire.glb',
+        mudHut: '/models/props/mushroom_red.glb',
+        column: '/models/props/column.glb',
+        columnBroken: '/models/props/column_broken.glb',
+        dock: '/models/props/dock_platform.glb',
+        fence: '/models/props/fence.glb'
+    };
+    
+    await Promise.all(Object.entries(propUrls).map(async ([key, url]) => {
+        propModels[key] = await loadModel(url);
+    }));
+    
+    // Spawn houses
+    spawnProp(propModels.house1, 10, terrainHeight(10, 12, seed) - 0.12, 12, -0.4, [1.0, 1.0, 1.0]);
+    spawnProp(propModels.house2, -10, terrainHeight(-10, 10, seed) - 0.12, 10, 0.5, [1.0, 1.0, 1.0]);
+    spawnProp(propModels.inn, 12, terrainHeight(12, -6, seed) - 0.12, -6, 2.4, [1.0, 1.0, 1.0]);
+    spawnProp(propModels.chapel, -16, terrainHeight(-16, -8, seed) - 0.12, -8, 0.9, [1.0, 1.0, 1.0]);
+    
+    // Spawn wells
+    spawnProp(propModels.well, 0, terrainHeight(0, 2, seed) - 0.1, 2, 0, [1.0, 1.0, 1.0]);
+    
+    // Spawn stalls
+    spawnProp(propModels.stand1, -8.5, terrainHeight(-8.5, 3, seed) - 0.06, 3, Math.PI / 2, [1.0, 1.0, 1.0]);
+    spawnProp(propModels.stand2, 9.5, terrainHeight(9.5, 17.5, seed) - 0.06, 17.5, -2.7, [1.0, 1.0, 1.0]);
+    spawnProp(propModels.stand1, 0, terrainHeight(0, 11.5, seed) - 0.06, 11.5, Math.PI, [1.1, 1.1, 1.1]);
+    
+    // Spawn tents
+    spawnProp(propModels.tent, 62, terrainHeight(62, -61, seed) - 0.06, -61, 0.4, 1.0);
+    spawnProp(propModels.tent, 69, terrainHeight(69, -69, seed) - 0.06, -69, 2.1, 1.0);
+    spawnProp(propModels.tent, 88, terrainHeight(88, -86, seed) - 0.06, -86, 1.2, 1.3);
+    spawnProp(propModels.tent, 95, terrainHeight(95, -94, seed) - 0.06, -94, -0.6, 1.0);
+    
+    // Spawn crates
+    const crates = [[60, -63], [66, -67], [87, -88], [93, -90], [70, -72]];
+    crates.forEach(([x, z]) => {
+        spawnProp(propModels.crate, x, terrainHeight(x, z, seed) - 0.04, z, 0, 1.2);
+    });
+    
+    // Spawn campfires (bonfires)
+    const campfires = [[3, -4], [65, -65], [90, -90], [-80, -60], [-61, 56]];
+    campfires.forEach(([x, z]) => {
+        const y = terrainHeight(x, z, seed);
+        spawnProp(propModels.bonfire, x, y - 0.05, z, 0, 4.3);
+        
+        // Add campfire light
+        const light = new THREE.PointLight(0xff8830, 8, 12, 1.5);
+        light.position.set(x, y + 1.0, -z);
+        scene.add(light);
+    });
+    
+    // Spawn mud huts (Murloc camp)
+    const mudHuts = [[-73, 59], [-78, 54], [-69, 55]];
+    mudHuts.forEach(([x, z]) => {
+        spawnProp(propModels.mudHut, x, terrainHeight(x, z, seed) - 0.15, z, 0, [13, 10.5, 13]);
+    });
+    
+    // Spawn ruin rings
+    const ring = { x: 80, z: 78, ringR: 7, columns: 7 };
+    for (let i = 0; i < ring.columns; i++) {
+        const ang = (i / ring.columns) * Math.PI * 2;
+        const x = ring.x + Math.sin(ang) * ring.ringR;
+        const z = ring.z + Math.cos(ang) * ring.ringR;
+        const intact = i % 4 === 1;
+        const kind = intact ? propModels.column : propModels.columnBroken;
+        const sy = intact ? 3.5 + (i % 2) * 0.5 : 1.7 + (i % 3) * 0.85;
+        spawnProp(kind, x, terrainHeight(x, z, seed) - 0.1, z, 0, [3.8, sy, 3.8]);
+    }
+    
+    // Spawn docks
+    spawnProp(propModels.dock, -64, terrainHeight(-64, 60, seed) + 0.15, 60, -2.2, [0.78, 0.52, 0.85]);
+    
+    // Spawn fences
+    const fences = [
+        { x1: 16, z1: 16, x2: 22, z2: 4 },
+        { x1: -16, z1: 14, x2: -20, z2: 2 },
+    ];
+    fences.forEach(f => {
+        const len = Math.hypot(f.x2 - f.x1, f.z2 - f.z1);
+        const dirx = (f.x2 - f.x1) / len, dirz = (f.z2 - f.z1) / len;
+        const yaw = Math.atan2(-dirz, dirx);
+        const mx = (f.x1 + f.x2) / 2, mz = (f.z1 + f.z2) / 2;
+        const my = terrainHeight(mx, mz, seed) - 0.05;
+        spawnProp(propModels.fence, mx, my, mz, yaw, [3.0, 2.9, 3.0]);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +694,9 @@ export async function init(canvas, seed) {
 
     scene.add(buildTerrain(worldSeed));
     scene.add(buildWater());
+    
+    // Asynchronously load and spawn static props, trees, and rocks
+    buildWorldDecorations(worldSeed).catch(e => console.error("Error loading decorations:", e));
 
     canvas.addEventListener('mousedown',   onDown);
     canvas.addEventListener('mousemove',   onMove);
